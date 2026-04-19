@@ -26,7 +26,8 @@ import {
   Settings,
   Menu,
   X,
-  Sparkles
+  Sparkles,
+  Clock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -47,6 +48,11 @@ interface Scene {
 
 const SYSTEM_INSTRUCTION = `Eres un Ilustrador Técnico y Artista de Storyboard experto en composición visual y dibujo vectorial. 
 Tu misión es transformar un guion en ilustraciones gráficas vibrantes, detalladas y RECONOCIBLES utilizando HTML, CSS (Tailwind) y SVG.
+
+REGLA DE ORO DE CONTINUIDAD (MÁXIMA PRIORIDAD):
+1. NO RESUMAS: Debes generar una escena para CADA frase o idea del texto proporcionado.
+2. LITERALIDAD: La propiedad 'scriptPhrase' DEBE contener el texto EXACTO del guion original. No puedes omitir ni una sola palabra.
+3. SECUENCIALIDAD: Las escenas deben seguir el orden exacto del texto, palabra por palabra, de inicio a fin.
 
 REGLAS CRÍTICAS DE DIBUJO (OBLIGATORIAS):
 1. FORMATO 16:9 (1920x1080): Todas las escenas DEBEN usar un viewBox="0 0 1920 1080". Los elementos deben posicionarse dentro de este rango de coordenadas.
@@ -74,7 +80,7 @@ PROMPT DE IMAGEN (visualDescription):
 - Ejemplo: "Estilo anime 2D HD, fondo totalmente blanco, plano medio de tres figuras minimalistas observando un estante con frascos brillantes, colores vibrantes, trazo limpio".
 
 Para cada escena, proporciona:
-- scriptPhrase: La frase del guion.
+- scriptPhrase: El fragmento EXACTO y LITERAL del guion.
 - visualDescription: Un prompt completo para generación de imágenes basado en la escena y el estilo solicitado.
 - elements: Lista de elementos clave dibujados.
 - htmlPreview: El código HTML/CSS/SVG completo, estructurado y visualmente rico.`;
@@ -106,31 +112,76 @@ export default function App() {
   const [script, setScript] = useState('');
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState({ current: 0, total: 0 });
+  const [loadingMessage, setLoadingMessage] = useState("Iniciando motores de IA...");
   const [error, setError] = useState<string | null>(null);
   const [alwaysWhiteBackground, setAlwaysWhiteBackground] = useState(false);
   const [addText, setAddText] = useState(false);
-  const [globalStyle, setGlobalStyle] = useState('Cartoon 2d anime hd');
+  const [globalStyle, setGlobalStyle] = useState('');
   const [showResults, setShowResults] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
+  
+  // Estados de Créditos (Basado en 3 APIs x 1,500 solicitudes diarias)
+  const DAILY_CREDITS = 4500;
+  const [credits, setCredits] = useState<number>(DAILY_CREDITS);
+  const [timeLeft, setTimeLeft] = useState<string>("24:00:00");
+  const [lastReset, setLastReset] = useState<number>(Date.now());
 
   useEffect(() => {
-    // Prevent libraries from trying to overwrite window.fetch which is read-only
-    try {
-      const originalFetch = window.fetch;
-      Object.defineProperty(window, 'fetch', {
-        value: originalFetch,
-        writable: false,
-        configurable: false
-      });
-    } catch (e) {
-      console.warn('Could not lock window.fetch:', e);
+    // Cargar datos de créditos
+    const savedCredits = localStorage.getItem('ezeh_credits');
+    const savedReset = localStorage.getItem('ezeh_last_reset');
+    const now = Date.now();
+    const oneDay = 24 * 60 * 60 * 1000;
+
+    if (savedReset && savedCredits) {
+      const lastResetTime = parseInt(savedReset, 10);
+      if (now - lastResetTime >= oneDay) {
+        // Reiniciar si pasaron 24h
+        setCredits(DAILY_CREDITS);
+        setLastReset(now);
+        localStorage.setItem('ezeh_credits', DAILY_CREDITS.toString());
+        localStorage.setItem('ezeh_last_reset', now.toString());
+      } else {
+        setCredits(parseInt(savedCredits, 10));
+        setLastReset(lastResetTime);
+      }
+    } else {
+      localStorage.setItem('ezeh_credits', DAILY_CREDITS.toString());
+      localStorage.setItem('ezeh_last_reset', now.toString());
     }
 
+    // Timer de cuenta regresiva
+    const timer = setInterval(() => {
+      const currentTime = Date.now();
+      const savedResetTime = parseInt(localStorage.getItem('ezeh_last_reset') || currentTime.toString(), 10);
+      const elapsed = currentTime - savedResetTime;
+      const remaining = Math.max(0, oneDay - elapsed);
+      
+      if (remaining === 0) {
+        setCredits(DAILY_CREDITS);
+        const newReset = Date.now();
+        setLastReset(newReset);
+        localStorage.setItem('ezeh_credits', DAILY_CREDITS.toString());
+        localStorage.setItem('ezeh_last_reset', newReset.toString());
+      }
+
+      const hours = Math.floor(remaining / (1000 * 60 * 60));
+      const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+      
+      setTimeLeft(`${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const handleError = (event: ErrorEvent) => {
-      if (event.message?.includes('Cannot set property fetch of #<Window>') || 
-          event.error?.message?.includes('Cannot set property fetch of #<Window>')) {
+      const errorMessage = event.message || event.error?.message || '';
+      if (errorMessage.includes('fetch') && (errorMessage.includes('getter') || errorMessage.includes('read only'))) {
         event.preventDefault();
-        console.warn('Blocked an attempt to overwrite window.fetch');
+        console.warn('Protección de fetch activa: Se bloqueó un intento de modificación externo.');
       }
     };
 
@@ -140,87 +191,136 @@ export default function App() {
 
   const generateStoryboard = async () => {
     if (!script.trim()) return;
+    if (credits <= 0) {
+      setError("Has agotado tus créditos diarios. Espera al reinicio para generar más.");
+      return;
+    }
 
     setIsGenerating(true);
     setError(null);
-
+    setScenes([]);
+    setLoadingMessage("Analizando la estructura de tu guion...");
+    
     try {
+      // 1. Dividir el guion en oraciones o frases cortas para asegurar 1:1
+      // Usamos un regex que divide por puntos, exclamaciones, interrogaciones o saltos de línea
+      const sentences = script
+        .split(/(?<=[.!?])|\n+/)
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      // Agrupamos las oraciones en bloques de 10 para no saturar la API pero mantener el control
+      const chunkSize = 10;
+      const chunks: string[][] = [];
+      for (let i = 0; i < sentences.length; i += chunkSize) {
+        chunks.push(sentences.slice(i, i + chunkSize));
+      }
+
+      setGenerationProgress({ current: 0, total: chunks.length });
+      const allGeneratedScenes: any[] = [];
       const model = "gemini-3-flash-preview";
-      
-      const response = await geminiRotator.generateContent({
-        model,
-        contents: [{ 
-          role: 'user', 
-          parts: [{ 
-            text: `Genera un storyboard completo para este guion. 
-            
-            FORMATO REQUERIDO: Horizontal 16:9 (1920x1080). El SVG generado DEBE usar viewBox="0 0 1920 1080".
-            
-            ESTILO VISUAL REQUERIDO PARA LOS PROMPTS (visualDescription): ${globalStyle}${alwaysWhiteBackground ? ', fondo totalmente blanco' : ''}
-            
-            REQUISITOS DE CALIDAD PARA EL BOCETO (htmlPreview):
-            - DIBUJO RECONOCIBLE: Las figuras humanas deben tener cabeza, torso y extremidades. Los objetos deben ser claros.
-            - COMPOSICIÓN RICA: No generes escenas vacías. Dibuja el entorno, los personajes y los objetos mencionados.
-            - ESCALA: Asegúrate de que los personajes y objetos sean grandes y ocupen la mayor parte del encuadre. No dibujes elementos minúsculos.
-            - ESTILO DEL BOCETO: Ilustraciones gráficas vibrantes, coloridas y creativas con trazos definidos (stroke-width="2"). Sin efectos de luz o blur.
-            - FONDO: ${alwaysWhiteBackground ? 'TODAS las escenas DEBEN tener fondo blanco (#FFFFFF) tanto en el dibujo como en el prompt de texto.' : 'Usa colores planos variados y coherentes con la escena para crear un entorno rico.'}
-            ${addText ? '- TEXTO ESTRATÉGICO (OBLIGATORIO EN htmlPreview): Identifica la frase o palabra más impactante del guion de CADA escena e INCLÚYELA físicamente dentro del dibujo SVG usando la etiqueta <text>. Colócala de forma creativa y estratégica (ej: cerca de la cabeza de un personaje, en un tercio libre, etc.). Usa un <rect> de fondo semitransparente para que el texto sea perfectamente legible sobre el dibujo. El texto debe ser parte del SVG. NO lo incluyas en el visualDescription.' : ''}
-            
-            Guion:
-            ${script}` 
-          }] 
-        }],
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
 
-      const result = JSON.parse(response.text);
+      const loadingPhrases = [
+        "Analizando cada palabra del guion...",
+        "Dibujando bocetos de las escenas...",
+        "Redactando prompts cinematográficos...",
+        "Optimizando la composición visual...",
+        "Asegurando la coherencia del estilo...",
+        "Añadiendo detalles atmosféricos...",
+        "Finalizando los últimos trazos..."
+      ];
 
-      const formattedScenes = result.map((s: any, index: number) => {
-        // Use DOMPurify for robust sanitization
-        let sanitizedHtml = DOMPurify.sanitize(s.htmlPreview, {
-          ALLOWED_TAGS: [
-            'div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
-            'ul', 'ol', 'li', 'br', 'hr', 'svg', 'path', 'circle', 
-            'rect', 'line', 'polyline', 'polygon', 'ellipse', 'g', 
-            'defs', 'linearGradient', 'radialGradient', 'stop', 'clipPath',
-            'style', 'text', 'tspan' // Allow style and text tags
-          ],
-          ALLOWED_ATTR: [
-            'class', 'style', 'id', 'width', 'height', 'viewBox', 
-            'fill', 'stroke', 'stroke-width', 'd', 'cx', 'cy', 'r', 
-            'x', 'y', 'x1', 'y1', 'x2', 'y2', 'points', 'transform',
-            'offset', 'stop-color', 'stop-opacity', 'gradientUnits',
-            'gradientTransform', 'spreadMethod', 'clip-path',
-            'font-family', 'font-size', 'font-weight', 'text-anchor', 'dominant-baseline'
-          ],
-          FORBID_ATTR: ['on*', 'srcdoc', 'data'],
-          FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'img'],
-          KEEP_CONTENT: true
+      // 2. Procesar cada bloque secuencialmente
+      for (let i = 0; i < chunks.length; i++) {
+        setGenerationProgress({ current: i + 1, total: chunks.length });
+        setLoadingMessage(loadingPhrases[i % loadingPhrases.length]);
+        
+        const response = await geminiRotator.generateContent({
+          model,
+          contents: [{ 
+            role: 'user', 
+            parts: [{ 
+              text: `Genera el storyboard para esta PARTE (${i + 1} de ${chunks.length}) del guion. 
+              
+              INSTRUCCIÓN OBLIGATORIA: Debes generar EXACTAMENTE UNA ESCENA para cada una de las siguientes frases. NO puedes omitir ninguna palabra ni resumir el texto. Cada frase debe ser la 'scriptPhrase' de su respectiva escena.
+              
+              Frases a procesar:
+              ${chunks[i].map((s, idx) => `${idx + 1}. ${s}`).join('\n')}
+              
+              FORMATO REQUERIDO: Horizontal 16:9 (1920x1080). El SVG generado DEBE usar viewBox="0 0 1920 1080".
+              
+              ESTILO VISUAL REQUERIDO: ${globalStyle}${alwaysWhiteBackground ? ', fondo totalmente blanco' : ''}
+              
+              REQUISITOS:
+              - DIBUJO RECONOCIBLE: Figuras con cabeza, torso y extremidades.
+              - COMPOSICIÓN RICA: Entorno detallado.
+              - ESCALA: Elementos grandes en el encuadre.
+              ${addText ? '- TEXTO ESTRATÉGICO: Incluye la frase clave dentro del SVG usando <text> con fondo semitransparente.' : ''}` 
+            }] 
+          }],
+          config: {
+            systemInstruction: SYSTEM_INSTRUCTION,
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+          },
         });
+
+        const result = JSON.parse(response.text);
+        const chunkScenes = Array.isArray(result) ? result : [];
         
-        // Final safety check for "fetch =" or "window.fetch =" in generated content
-        sanitizedHtml = sanitizedHtml.replace(/\bfetch\s*=/gim, "/*blocked_fetch*/=");
-        sanitizedHtml = sanitizedHtml.replace(/window\.fetch\s*=/gim, "window./*blocked_fetch*/=");
-        sanitizedHtml = sanitizedHtml.replace(/window\s*\[\s*['"]fetch['"]\s*\]\s*=/gim, "window['/*blocked_fetch*/']=");
+        // Formatear escenas del bloque
+        const formattedChunkScenes = chunkScenes.map((s: any, index: number) => {
+          let sanitizedHtml = DOMPurify.sanitize(s.htmlPreview, {
+            ALLOWED_TAGS: [
+              'div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
+              'ul', 'ol', 'li', 'br', 'hr', 'svg', 'path', 'circle', 
+              'rect', 'line', 'polyline', 'polygon', 'ellipse', 'g', 
+              'defs', 'linearGradient', 'radialGradient', 'stop', 'clipPath',
+              'style', 'text', 'tspan'
+            ],
+            ALLOWED_ATTR: [
+              'class', 'style', 'id', 'width', 'height', 'viewBox', 
+              'fill', 'stroke', 'stroke-width', 'd', 'cx', 'cy', 'r', 
+              'x', 'y', 'x1', 'y1', 'x2', 'y2', 'points', 'transform',
+              'offset', 'stop-color', 'stop-opacity', 'gradientUnits',
+              'gradientTransform', 'spreadMethod', 'clip-path',
+              'font-family', 'font-size', 'font-weight', 'text-anchor', 'dominant-baseline'
+            ],
+            FORBID_ATTR: ['on*', 'srcdoc', 'data'],
+            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'img'],
+            KEEP_CONTENT: true
+          });
+          
+          sanitizedHtml = sanitizedHtml.replace(/\bfetch\s*=/gim, "/*blocked_fetch*/=");
+          sanitizedHtml = sanitizedHtml.replace(/window\.fetch\s*=/gim, "window./*blocked_fetch*/=");
+          
+          return {
+            ...s,
+            htmlPreview: sanitizedHtml,
+            id: `scene-${Date.now()}-${allGeneratedScenes.length + index}`
+          };
+        });
+
+        allGeneratedScenes.push(...formattedChunkScenes);
         
-        return {
-          ...s,
-          htmlPreview: sanitizedHtml,
-          id: `scene-${Date.now()}-${index}`
-        };
-      });
-      
-      setScenes(formattedScenes);
-      setShowResults(true);
+        // Deducción de créditos por bloque procesado
+        const newCredits = Math.max(0, credits - 1);
+        setCredits(newCredits);
+        localStorage.setItem('ezeh_credits', newCredits.toString());
+      }
+
+      // 3. Finalizar y mostrar resultados consolidados
+      setLoadingMessage("¡Todo listo! Preparando tu storyboard...");
+      setScenes(allGeneratedScenes);
+      setTimeout(() => {
+        setShowResults(true);
+      }, 1000);
     } catch (err) {
       console.error("Error generating storyboard:", err);
       setError("Hubo un error al generar el storyboard. Por favor, inténtalo de nuevo.");
     } finally {
       setIsGenerating(false);
+      setGenerationProgress({ current: 0, total: 0 });
     }
   };
 
@@ -372,6 +472,87 @@ export default function App() {
           </div>
         );
       case 'storyboard':
+        if (isGenerating) {
+          return (
+            <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center overflow-hidden">
+              {/* Efectos de fondo rojos suaves */}
+              <motion.div 
+                animate={{ 
+                  scale: [1, 1.2, 1],
+                  opacity: [0.3, 0.5, 0.3],
+                  x: [-20, 20, -20],
+                  y: [-20, 20, -20]
+                }}
+                transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
+                className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-red-900/20 blur-[120px] rounded-full"
+              />
+              <motion.div 
+                animate={{ 
+                  scale: [1.2, 1, 1.2],
+                  opacity: [0.2, 0.4, 0.2],
+                  x: [20, -20, 20],
+                  y: [20, -20, 20]
+                }}
+                transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+                className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-red-900/10 blur-[150px] rounded-full"
+              />
+
+              <div className="relative z-10 flex flex-col items-center max-w-md w-full px-8">
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-12 text-center"
+                >
+                  <div className="w-20 h-20 bg-red-600/10 rounded-3xl flex items-center justify-center text-red-600 mb-6 mx-auto">
+                    <Loader2 className="animate-spin" size={40} />
+                  </div>
+                  <h2 className="text-3xl font-black text-white tracking-tighter uppercase mb-2">Generando</h2>
+                  <p className="text-red-500 font-mono text-xs tracking-[0.3em] uppercase">{loadingMessage}</p>
+                </motion.div>
+
+                <div className="w-full space-y-4">
+                  <div className="flex justify-between text-[10px] font-black text-zinc-500 uppercase tracking-widest">
+                    <span>Progreso del Guion</span>
+                    <span>{Math.round((generationProgress.current / generationProgress.total) * 100)}%</span>
+                  </div>
+                  
+                  <div className="h-2 w-full bg-zinc-900 rounded-full overflow-hidden border border-white/5">
+                    <motion.div 
+                      className="h-full bg-red-600 shadow-[0_0_20px_rgba(220,38,38,0.5)]"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${(generationProgress.current / generationProgress.total) * 100}%` }}
+                      transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+                    />
+                  </div>
+
+                  <div className="flex justify-center gap-2">
+                    {Array.from({ length: generationProgress.total }).map((_, i) => (
+                      <div 
+                        key={i}
+                        className={cn(
+                          "w-1.5 h-1.5 rounded-full transition-all duration-300",
+                          i < generationProgress.current ? "bg-red-600 scale-125" : "bg-zinc-800"
+                        )}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <motion.p 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 1 }}
+                  className="mt-12 text-[10px] text-zinc-600 text-center leading-relaxed uppercase tracking-widest"
+                >
+                  Estamos procesando tu guion bloque por bloque para garantizar la máxima calidad visual. 
+                  <br />
+                  <span className="text-zinc-700">No cierres esta ventana.</span>
+                </motion.p>
+              </div>
+            </div>
+          );
+        }
+
         if (showResults && scenes.length > 0) {
           return (
             <div className="max-w-6xl mx-auto">
@@ -476,7 +657,7 @@ export default function App() {
                       type="text"
                       value={globalStyle}
                       onChange={(e) => setGlobalStyle(e.target.value)}
-                      placeholder="Ej: Cartoon 2d anime hd, Cinematic..."
+                      placeholder="Escribe el estilo que quieres"
                       className="w-full p-5 rounded-l-2xl rounded-r-none bg-black border border-white/10 focus:border-red-600 focus:ring-1 focus:ring-red-600 transition-all text-base text-white placeholder:text-gray-600 outline-none"
                     />
                   </div>
@@ -507,10 +688,25 @@ export default function App() {
                       )}
                     >
                       {isGenerating ? (
-                        <>
-                          <Loader2 className="animate-spin" size={20} />
-                          <span>Generando...</span>
-                        </>
+                        <div className="flex flex-col items-center gap-1">
+                          <div className="flex items-center gap-2">
+                            <Loader2 className="animate-spin" size={18} />
+                            <span>
+                              {generationProgress.total > 1 
+                                ? `Generando ${generationProgress.current}/${generationProgress.total}`
+                                : 'Generando...'}
+                            </span>
+                          </div>
+                          {generationProgress.total > 1 && (
+                            <div className="w-48 h-1 bg-white/10 rounded-full mt-1 overflow-hidden">
+                              <motion.div 
+                                className="h-full bg-white"
+                                initial={{ width: 0 }}
+                                animate={{ width: `${(generationProgress.current / generationProgress.total) * 100}%` }}
+                              />
+                            </div>
+                          )}
+                        </div>
                       ) : (
                         <span>Crear Storyboard</span>
                       )}
@@ -630,6 +826,41 @@ export default function App() {
             }} 
           />
         </nav>
+
+        {/* Créditos y Timer */}
+        {isSidebarOpen && (
+          <div className="p-4 mt-auto border-t border-white/5 bg-black/20">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Créditos Diarios</span>
+              <div className="flex items-center gap-1 text-red-500">
+                <Clock size={12} />
+                <span className="text-[10px] font-mono">{timeLeft}</span>
+              </div>
+            </div>
+            
+            <div className="space-y-3">
+              <div className="flex items-end justify-between">
+                <span className="text-2xl font-black text-white">{credits}</span>
+                <span className="text-xs text-zinc-500 mb-1">/ {DAILY_CREDITS}</span>
+              </div>
+              
+              <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden">
+                <motion.div 
+                  className="h-full bg-red-600"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${(credits / DAILY_CREDITS) * 100}%` }}
+                  transition={{ duration: 1 }}
+                />
+              </div>
+              
+              <p className="text-[10px] text-zinc-500 leading-tight">
+                Créditos basados en la capacidad total de tus 3 APIs de Gemini.
+                <br />
+                <span className="text-zinc-400 italic">1 crédito = 1 generación completa.</span>
+              </p>
+            </div>
+          </div>
+        )}
       </aside>
 
       {/* Main Content Area */}
